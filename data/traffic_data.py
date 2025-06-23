@@ -1,0 +1,318 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from typing import Dict, List, Tuple
+
+
+class TrafficData:
+    """
+    业务请求数据生成类
+    
+    用于生成各小区在不同时间步的数据请求量
+    """
+    
+    def __init__(self, 
+                 num_cells: int = 19,
+                 num_time_steps: int = 1440,  # 默认为24小时，每分钟一个时间步
+                 min_traffic_mbps: float = 10.0,  # 最小业务量 (Mbps)
+                 max_traffic_mbps: float = 100.0,  # 最大业务量 (Mbps)
+                 daily_pattern: bool = True,  # 是否考虑日变化模式
+                 random_seed: int = None):  # 随机种子
+        """
+        初始化业务请求数据生成类
+        
+        Args:
+            num_cells: 小区数量
+            num_time_steps: 时间步数
+            min_traffic_mbps: 最小业务量 (Mbps)
+            max_traffic_mbps: 最大业务量 (Mbps)
+            daily_pattern: 是否考虑日变化模式
+            random_seed: 随机种子
+        """
+        self.num_cells = num_cells
+        self.num_time_steps = num_time_steps
+        self.min_traffic_mbps = min_traffic_mbps
+        self.max_traffic_mbps = max_traffic_mbps
+        self.daily_pattern = daily_pattern
+        
+        # 设置随机种子
+        if random_seed is not None:
+            np.random.seed(random_seed)
+        
+        # 生成业务请求数据
+        self.traffic_data = self._generate_traffic_data()
+    
+    def _generate_traffic_data(self):
+        """
+        生成业务请求数据
+        
+        Returns:
+            traffic_data: 业务请求数据，shape=(num_time_steps, num_cells)，单位：Mbps
+        """
+        # 初始化业务请求数据数组
+        traffic_data = np.zeros((self.num_time_steps, self.num_cells))
+        
+        # 为每个小区生成基础业务量
+        base_traffic = np.random.uniform(
+            self.min_traffic_mbps,
+            self.max_traffic_mbps,
+            size=self.num_cells
+        )
+        
+        # 生成每个时间步的业务请求数据
+        for t in range(self.num_time_steps):
+            # 基础业务量
+            traffic = base_traffic.copy()
+            
+            # 添加日变化模式
+            if self.daily_pattern:
+                # 计算一天中的时间（小时）
+                hour_of_day = (t % 1440) / 60.0  # 假设每分钟一个时间步
+                
+                # 日变化系数（模拟工作时间高峰和夜间低谷）
+                daily_factor = self._calculate_daily_factor(hour_of_day)
+                
+                # 应用日变化系数
+                traffic = traffic * daily_factor
+            
+            # 添加随机波动
+            random_factor = 0.8 + 0.4 * np.random.random(self.num_cells)  # 随机因子范围：[0.8, 1.2]
+            traffic = traffic * random_factor
+            
+            # 存储业务请求数据
+            traffic_data[t] = traffic
+        
+        return traffic_data
+    
+    def _calculate_daily_factor(self, hour_of_day):
+        """
+        计算日变化系数
+        
+        Args:
+            hour_of_day: 一天中的时间（小时）
+        
+        Returns:
+            daily_factor: 日变化系数数组，shape=(num_cells,)
+        """
+        # 初始化日变化系数数组
+        daily_factor = np.ones(self.num_cells)
+        
+        # 定义日变化模式
+        # 早高峰：7-10点
+        # 工作时间：10-17点
+        # 晚高峰：17-22点
+        # 夜间：22-7点
+        
+        # 为每个小区计算日变化系数
+        for i in range(self.num_cells):
+            # 基础系数
+            if 0 <= hour_of_day < 7:  # 夜间
+                factor = 0.3 + 0.2 * np.random.random()
+            elif 7 <= hour_of_day < 10:  # 早高峰
+                factor = 0.7 + 0.6 * np.random.random()
+            elif 10 <= hour_of_day < 17:  # 工作时间
+                factor = 0.6 + 0.4 * np.random.random()
+            elif 17 <= hour_of_day < 22:  # 晚高峰
+                factor = 0.8 + 0.4 * np.random.random()
+            else:  # 22-24点
+                factor = 0.4 + 0.3 * np.random.random()
+            
+            # 存储日变化系数
+            daily_factor[i] = factor
+        
+        return daily_factor
+    
+    def get_traffic_data(self, time_step: int):
+        """
+        获取指定时间步的业务请求数据
+        
+        Args:
+            time_step: 时间步索引
+        
+        Returns:
+            traffic: 业务请求数据，shape=(num_cells,)，单位：Mbps
+        """
+        if time_step < 0 or time_step >= self.num_time_steps:
+            raise ValueError(f"时间步索引超出范围：{time_step}，应在[0, {self.num_time_steps-1}]范围内")
+        
+        return self.traffic_data[time_step]
+    
+    def get_all_traffic_data(self):
+        """
+        获取所有时间步的业务请求数据
+        
+        Returns:
+            traffic_data: 业务请求数据，shape=(num_time_steps, num_cells)，单位：Mbps
+        """
+        return self.traffic_data
+    
+    def plot_traffic_pattern(self, cell_indices=None):
+        """
+        绘制业务请求模式
+        
+        Args:
+            cell_indices: 要绘制的小区索引列表，如果为None则绘制所有小区
+        """
+        # 如果未指定小区索引，则绘制所有小区
+        if cell_indices is None:
+            cell_indices = list(range(self.num_cells))
+        
+        # 创建图形
+        plt.figure(figsize=(12, 6))
+        
+        # 时间轴（小时）
+        time_hours = np.arange(self.num_time_steps) / 60.0  # 假设每分钟一个时间步
+        
+        # 绘制每个小区的业务请求模式
+        for cell_idx in cell_indices:
+            plt.plot(time_hours, self.traffic_data[:, cell_idx], label=f'Cell {cell_idx+1}')
+        
+        # 设置坐标轴标签
+        plt.xlabel('Time (hours)')
+        plt.ylabel('Traffic Demand (Mbps)')
+        
+        # 设置标题
+        plt.title('Traffic Demand Pattern')
+        
+        # 添加图例
+        plt.legend()
+        
+        # 添加网格
+        plt.grid(True, linestyle='--', alpha=0.7)
+        
+        # 显示图形
+        plt.tight_layout()
+        plt.show()
+    
+    def plot_traffic_heatmap(self, time_step: int):
+        """
+        绘制指定时间步的业务请求热力图
+        
+        Args:
+            time_step: 时间步索引
+        """
+        # 获取指定时间步的业务请求数据
+        traffic = self.get_traffic_data(time_step)
+        
+        # 创建图形
+        plt.figure(figsize=(10, 8))
+        
+        # 创建六边形网格布局
+        positions = []
+        
+        # 中心小区
+        positions.append([0, 0])
+        
+        # 第一环（6个小区）
+        for i in range(6):
+            angle = i * 60  # 角度，单位：度
+            angle_rad = np.radians(angle)  # 转换为弧度
+            x = np.cos(angle_rad)
+            y = np.sin(angle_rad)
+            positions.append([x, y])
+        
+        # 第二环（12个小区）
+        for i in range(12):
+            angle = i * 30  # 角度，单位：度
+            angle_rad = np.radians(angle)  # 转换为弧度
+            x = 2 * np.cos(angle_rad)
+            y = 2 * np.sin(angle_rad)
+            positions.append([x, y])
+        
+        # 确保小区数量正确
+        positions = positions[:self.num_cells]
+        
+        # 绘制六边形网格
+        for i, pos in enumerate(positions):
+            # 创建六边形
+            angles = np.linspace(0, 2*np.pi, 7)[:-1]
+            hex_x = 0.8 * np.cos(angles) + pos[0]
+            hex_y = 0.8 * np.sin(angles) + pos[1]
+            
+            # 根据业务量确定颜色
+            color_intensity = (traffic[i] - self.min_traffic_mbps) / (self.max_traffic_mbps - self.min_traffic_mbps)
+            color_intensity = np.clip(color_intensity, 0, 1)  # 限制在[0, 1]范围内
+            
+            # 绘制六边形
+            plt.fill(hex_x, hex_y, color=plt.cm.jet(color_intensity), edgecolor='black')
+            
+            # 添加小区索引和业务量标签
+            plt.text(pos[0], pos[1], f'{i+1}\n{traffic[i]:.1f}', 
+                     ha='center', va='center', color='black', fontsize=10, fontweight='bold')
+        
+        # 设置坐标轴范围
+        plt.xlim([-3, 3])
+        plt.ylim([-3, 3])
+        
+        # 设置坐标轴相等比例
+        plt.axis('equal')
+        
+        # 关闭坐标轴
+        plt.axis('off')
+        
+        # 添加颜色条
+        cbar = plt.colorbar(plt.cm.ScalarMappable(cmap=plt.cm.jet), 
+                           orientation='vertical', shrink=0.8)
+        cbar.set_label('Traffic Demand (Mbps)')
+        
+        # 设置标题
+        hour = (time_step % 1440) / 60.0
+        plt.title(f'Traffic Demand Heatmap at Hour {hour:.1f}')
+        
+        # 显示图形
+        plt.tight_layout()
+        plt.show()
+    
+    def save_to_file(self, file_path: str):
+        """
+        保存业务请求数据到文件
+        
+        Args:
+            file_path: 文件路径
+        """
+        # 保存数据
+        np.save(file_path, self.traffic_data)
+        
+        print(f"业务请求数据已保存到：{file_path}")
+    
+    @staticmethod
+    def load_from_file(file_path: str):
+        """
+        从文件加载业务请求数据
+        
+        Args:
+            file_path: 文件路径
+        
+        Returns:
+            traffic_data: 业务请求数据对象
+        """
+        # 加载数据
+        traffic_data_array = np.load(file_path)
+        
+        # 创建对象
+        traffic_data = TrafficData()
+        traffic_data.traffic_data = traffic_data_array
+        traffic_data.num_time_steps, traffic_data.num_cells = traffic_data_array.shape
+        
+        return traffic_data
+
+
+# 示例用法
+if __name__ == "__main__":
+    # 创建业务请求数据生成器
+    traffic_data = TrafficData(
+        num_cells=19,
+        num_time_steps=1440,  # 24小时，每分钟一个时间步
+        min_traffic_mbps=10.0,
+        max_traffic_mbps=100.0,
+        daily_pattern=True,
+        random_seed=42
+    )
+    
+    # 绘制业务请求模式
+    traffic_data.plot_traffic_pattern(cell_indices=[0, 1, 2, 3, 4])
+    
+    # 绘制业务请求热力图
+    traffic_data.plot_traffic_heatmap(time_step=540)  # 9:00
+    
+    # 保存数据
+    traffic_data.save_to_file("traffic_data.npy")
