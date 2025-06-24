@@ -45,7 +45,7 @@ class ChannelModel:
         self.wavelength = self.c / (self.frequency_ghz * 1e9)
         
         # 初始化卫星位置
-        self.satellite_position = np.array([0, 0, satellite_height_km * 1000])  # 单位：米
+        self.satellite_position = np.array([-2650896.795413222,-4591487.935277223,4448733.046640539])
         
         # 初始化小区位置
         self.cell_positions = self._initialize_cell_positions()
@@ -92,9 +92,78 @@ class ChannelModel:
         Returns:
             cell_positions: 小区位置数组，shape=(num_cells, 3)，单位：米
         """
+        # 首先尝试从CSV文件加载小区位置
+        try:
+            cell_positions = self._load_cell_positions_from_csv()
+            print("成功从CSV文件加载小区位置")
+            return cell_positions
+        except Exception as e:
+            print(f"从CSV文件加载小区位置失败: {e}")
+            print("使用默认的六边形网格布局")
+            return self._generate_default_cell_positions()
+    
+    def _load_cell_positions_from_csv(self, csv_path="data_dir/cell_positions_fixed.csv"):
+        """
+        从CSV文件加载小区位置
+        
+        Args:
+            csv_path: CSV文件路径
+            
+        Returns:
+            cell_positions: 小区位置数组，shape=(num_cells, 3)，单位：米
+        """
+        import os
+        
+        # 检查文件是否存在
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"CSV文件不存在: {csv_path}")
+        
+        try:
+            # 尝试使用pandas读取（更方便）
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+            
+            # 检查列名
+            required_columns = ['X', 'Y', 'Z']
+            for col in required_columns:
+                if col not in df.columns:
+                    raise ValueError(f"CSV文件缺少必需的列: {col}")
+            
+            # 提取位置数据
+            positions = df[['X', 'Y', 'Z']].values
+            
+        except ImportError:
+            # 如果pandas不可用，使用numpy读取
+            print("pandas不可用，使用numpy读取CSV文件")
+            data = np.loadtxt(csv_path, delimiter=',', skiprows=1)  # 跳过标题行
+            
+            # 假设CSV格式为: Cell_Index,X,Y,Z
+            if data.shape[1] < 4:
+                raise ValueError("CSV文件格式不正确，应包含至少4列")
+            
+            # 提取X,Y,Z列（索引1,2,3）
+            positions = data[:, 1:4]
+        
+        # 确保小区数量匹配
+        if len(positions) < self.num_cells:
+            raise ValueError(f"CSV文件中的小区数量({len(positions)})少于所需数量({self.num_cells})")
+        
+        # 取前num_cells个小区
+        positions = positions[:self.num_cells]
+        
+        print(f"从CSV文件加载了{len(positions)}个小区位置")
+        return np.array(positions)
+    
+    def _generate_default_cell_positions(self):
+        """
+        生成默认的六边形网格小区位置
+        
+        Returns:
+            cell_positions: 小区位置数组，shape=(num_cells, 3)，单位：米
+        """
         # 创建六边形网格布局
         # 小区半径 (km)
-        cell_radius_km = 50
+        cell_radius_km = 60
         
         # 转换为米
         cell_radius = cell_radius_km * 1000
@@ -103,7 +172,7 @@ class ChannelModel:
         positions = []
         
         # 中心小区
-        positions.append([0, 0, 0])
+        positions.append([40, -120, 0])
         
         # 第一环（6个小区）
         for i in range(6):
@@ -169,7 +238,6 @@ class ChannelModel:
                 
                 # 转换为线性值
                 self.channel_gains[beam_idx, cell_idx] = 10 ** (channel_gain_db / 10)
-    
     def _calculate_path_loss(self, distance):
         """
         计算路径损耗
@@ -180,9 +248,17 @@ class ChannelModel:
         Returns:
             path_loss_db: 路径损耗 (dB)
         """
-        # 自由空间路径损耗模型
-        # PL(dB) = 20*log10(4*pi*d/lambda)
-        path_loss_db = 20 * np.log10(4 * np.pi * distance / self.wavelength)
+        # 自由空间路径损耗模型 (Free Space Path Loss, FSPL)
+        # PL(dB) = 20*log10(4*pi*d*f/c)
+        # 其中：d是距离(m)，f是频率(Hz)，c是光速(m/s)
+        
+        frequency_hz = self.frequency_ghz * 1e9  # 转换为Hz
+        
+        # 计算路径损耗
+        path_loss_db = 20 * np.log10(4 * np.pi * distance * frequency_hz / self.c)
+        
+        # 确保路径损耗为正值且在合理范围内
+        path_loss_db = max(path_loss_db, 32.45)  # 最小自由空间损耗(1km@1GHz)
         
         return path_loss_db
     
@@ -203,7 +279,13 @@ class ChannelModel:
 
         # 计算从卫星到小区的方向向量
         cell_direction = cell_position - self.satellite_position
-        cell_direction = cell_direction / np.linalg.norm(cell_direction)
+        direction_norm = np.linalg.norm(cell_direction)
+        
+        # 避免除零错误
+        if direction_norm < 1e-10:
+            return -30  # 返回最小增益
+            
+        cell_direction = cell_direction / direction_norm
         
         # 计算夹角 (弧度)
         cos_angle = np.dot(beam_direction, cell_direction)
@@ -213,19 +295,20 @@ class ChannelModel:
         # 转换为角度
         angle_deg = np.degrees(angle_rad)
         
-        # 使用简化的天线增益模型
-        # 波束宽度 (度)
-        beamwidth = 8.0
+        # 使用改进的天线增益模型
+        # 3dB波束宽度 (度)
+        beamwidth_3db = 8.0
         
         # 计算天线增益
-        if angle_deg <= beamwidth / 2:
-            # 主瓣
-            antenna_gain_db = 0  # 相对增益，主瓣为0dB
+        if angle_deg <= beamwidth_3db / 2:
+            # 主瓣内，使用抛物线模型
+            antenna_gain_db = -3 * (angle_deg / (beamwidth_3db / 2)) ** 2
         else:
-            # 旁瓣，使用简化模型
-            antenna_gain_db = -12 * (angle_deg / beamwidth) ** 2
-            # 限制最小增益
-            antenna_gain_db = max(antenna_gain_db, -30)
+            # 旁瓣，使用衰减模型
+            # 按照ITU-R建议，旁瓣衰减通常为 -12 * (θ/θ_3dB)^2
+            antenna_gain_db = -12 * (angle_deg / beamwidth_3db) ** 2
+            # 限制最小增益，避免过度衰减
+            antenna_gain_db = max(antenna_gain_db, -40)
         
         return antenna_gain_db
     
@@ -239,3 +322,31 @@ class ChannelModel:
         # 转换为线性值并应用
         variation_linear = 10 ** (variation_db / 10)
         self.channel_gains = self.channel_gains * variation_linear
+    
+    def reload_cell_positions(self, csv_path=None):
+        """
+        重新加载小区位置
+        
+        Args:
+            csv_path: CSV文件路径，如果为None则使用默认路径
+        """
+        if csv_path is None:
+            csv_path = "data_dir/cell_positions_fixed.csv"
+        
+        try:
+            self.cell_positions = self._load_cell_positions_from_csv(csv_path)
+            # 重新计算信道增益
+            self._update_channel_gains()
+            print("小区位置重新加载成功")
+        except Exception as e:
+            print(f"重新加载小区位置失败: {e}")
+            print("保持当前小区位置不变")
+    
+    def get_cell_positions(self):
+        """
+        获取当前小区位置
+        
+        Returns:
+            cell_positions: 小区位置数组，shape=(num_cells, 3)，单位：米
+        """
+        return self.cell_positions.copy()

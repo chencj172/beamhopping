@@ -296,6 +296,21 @@ class SatelliteEnv(gym.Env):
                 # 计算数据率 (Shannon公式，bits/s)
                 data_rates[cell_idx] = bandwidth_hz * np.log2(1 + sinr[cell_idx])
         return sinr, data_rates
+        
+    # 为了可视化，允许外部直接调用计算信噪比的方法
+    def _calculate_sinr(self, beam_allocation, power_allocation):
+        """
+        计算信噪比（用于可视化）
+        
+        Args:
+            beam_allocation: 波束分配数组
+            power_allocation: 功率分配数组
+            
+        Returns:
+            sinr: 信噪比数组
+            data_rates: 数据率数组
+        """
+        return self._calculate_sinr_and_data_rates(beam_allocation, power_allocation)
     
     def _calculate_reward(self, served_packets, avg_delay, dropped_packets):
         """
@@ -323,9 +338,9 @@ class SatelliteEnv(gym.Env):
         # reward = (self.reward_throughput_weight * throughput_reward) - \
         #          (self.reward_delay_weight * (delay_penalty + drop_penalty))
         
-        reward = (throughput_reward * 2.0) 
+        reward = (throughput_reward * 0.8) 
         - \
-                 (0.5 * delay_penalty + 1.2 * drop_penalty)
+                 (0.2 * delay_penalty + 2.0 * drop_penalty)
         
         return reward
     

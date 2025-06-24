@@ -27,7 +27,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Satellite Beam Hopping Experiment')
     
     # 实验设置
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--seed', type=int, default=50, help='Random seed')
     parser.add_argument('--num_episodes', type=int, default=1200, help='Number of training episodes')
     parser.add_argument('--max_steps', type=int, default=100, help='Maximum steps per episode')
     parser.add_argument('--eval_interval', type=int, default=10, help='Evaluation interval')
@@ -41,15 +41,15 @@ def parse_args():
     parser.add_argument('--total_bandwidth', type=float, default=200.0, help='Total bandwidth (MHz)')
     
     # 队列参数
-    parser.add_argument('--max_queue_size', type=int, default=300, help='Maximum queue size')
-    parser.add_argument('--packet_ttl', type=int, default=20, help='Packet time-to-live (slots)')
+    parser.add_argument('--max_queue_size', type=int, default=200, help='Maximum queue size')
+    parser.add_argument('--packet_ttl', type=int, default=15, help='Packet time-to-live (slots)')
     parser.add_argument('--packet_size', type=float, default=100.0, help='Packet size (KB)')
     
     # 强化学习参数
-    parser.add_argument('--lr_actor', type=float, default=1e-4, help='Actor learning rate')
-    parser.add_argument('--lr_critic', type=float, default=1e-3, help='Critic learning rate')
+    parser.add_argument('--lr_actor', type=float, default=3e-4, help='Actor learning rate')
+    parser.add_argument('--lr_critic', type=float, default=3e-4, help='Critic learning rate')
     parser.add_argument('--gamma', type=float, default=0.99, help='Discount factor')
-    parser.add_argument('--gae_lambda', type=float, default=0.97, help='GAE lambda parameter')
+    parser.add_argument('--gae_lambda', type=float, default=0.95, help='GAE lambda parameter')
     parser.add_argument('--clip_ratio', type=float, default=0.2, help='PPO clip ratio')
     parser.add_argument('--update_epochs', type=int, default=10, help='Number of update epochs')
     parser.add_argument('--mini_batch_size', type=int, default=64, help='Mini-batch size')
@@ -244,7 +244,11 @@ def train(env, agent, args):
         'throughputs': [],
         'delays': [],
         'packet_losses': [],
-        'fairness': []
+        'fairness': [],
+        'beam_allocation_counts': np.zeros((args.num_beams, args.num_cells)),  # 波束分配统计计数器
+        'power_allocations': [],  # 存储功率分配
+        'sinrs': [],  # 存储信噪比
+        'queue_lengths': []  # 存储队列长度
     }
     
     # 训练循环
@@ -293,9 +297,13 @@ def train(env, agent, args):
             episode_fairness += Metrics.calculate_fairness_index(info['data_rates'])
             episode_power += Metrics.calculate_power_efficiency(info['data_rates'], args.total_power)
             
-            # 如果episode结束，跳出循环
-            if done:
-                break
+            # 统计波束分配选择次数
+            beam_allocation = action['beam_allocation']
+            for beam_idx in range(args.num_beams):
+                cell_idx = beam_allocation[beam_idx]
+                if 0 <= cell_idx < args.num_cells:
+                    metrics['beam_allocation_counts'][beam_idx, cell_idx] += 1
+            
         
         # 更新策略
         loss_info = agent.update()
@@ -314,9 +322,18 @@ def train(env, agent, args):
         metrics['packet_losses'].append(episode_packet_loss)
         metrics['fairness'].append(episode_fairness)
         metrics['power_efficiency'] = episode_power
+
+        metrics['power_allocations'].append(action['power_allocation'].copy())
+        metrics['sinrs'].append(info['sinr'].copy())
+        metrics['queue_lengths'].append(env.queue_model.get_queue_state().copy())
+
+        # print(metrics['beam_allocations'])
+        # print(metrics['power_allocations'])
+        # print(metrics['sinrs'])
+        # print(metrics['queue_lengths'])
         
         # 打印训练信息
-        if args.verbose and (episode + 1) % 10 == 0:
+        if args.verbose and (episode + 1) % args.eval_interval == 0:
             print(f"Episode {episode+1}/{args.num_episodes} - "
                   f"Reward: {episode_reward:.2f}, "
                   f"Throughput: {episode_throughput:.2f} packets, "
@@ -358,7 +375,11 @@ def evaluate(env, agent, episode, args):
         'packet_loss': 0,
         'fairness': 0,
         'spectral_efficiency': 0,
-        'power_efficiency': 0
+        'power_efficiency': 0,
+        'beam_allocation_counts': np.zeros((args.num_beams, args.num_cells)),  # 波束分配统计
+        'power_allocations': [],  # 记录功率分配
+        'sinrs': [],  # 记录信噪比
+        'queue_lengths': []  # 记录队列长度
     }
     
     # 重置环境
@@ -387,12 +408,19 @@ def evaluate(env, agent, episode, args):
         eval_metrics['spectral_efficiency'] += Metrics.calculate_spectral_efficiency(info['data_rates'], args.total_bandwidth)
         eval_metrics['power_efficiency'] += Metrics.calculate_power_efficiency(info['data_rates'], args.total_power)
         
-        # 如果episode结束，跳出循环
-        if done:
-            break
+        # 统计波束分配选择次数
+        beam_allocation = action['beam_allocation']
+        for beam_idx in range(args.num_beams):
+            cell_idx = beam_allocation[beam_idx]
+            if 0 <= cell_idx < args.num_cells:
+                eval_metrics['beam_allocation_counts'][beam_idx, cell_idx] += 1
+        
+        eval_metrics['power_allocations'].append(action['power_allocation'].copy())
     
     # 计算平均指标
     for key in eval_metrics:
+        if key in ['beam_allocation_counts', 'power_allocations', 'queue_lengths', 'sinrs']:
+            continue
         eval_metrics[key] /= (step + 1)
     
     # 打印评估信息
@@ -415,9 +443,12 @@ def visualize_results(metrics, data, args):
     
     Args:
         metrics: 训练指标字典
-        data: 数据字典
+        data: 数据字典 (可能为None)
         args: 参数对象
     """
+    # 创建输出目录
+    os.makedirs(args.output_dir, exist_ok=True)
+    
     # 绘制学习曲线
     Visualization.plot_learning_curve(
         rewards=metrics['rewards'],
@@ -440,8 +471,22 @@ def visualize_results(metrics, data, args):
     plt.savefig(os.path.join(args.output_dir, 'performance_metrics_fixed.png'))
     plt.close()
     
-    # 获取小区位置数据
-    cell_positions = data['cell_data'].get_all_cell_positions()
+    # 创建环境实例以获取真实数据
+    env = SatelliteEnv(
+        num_beams=args.num_beams,
+        num_cells=args.num_cells,
+        total_power_dbw=args.total_power,
+        total_bandwidth_mhz=args.total_bandwidth,
+        satellite_height_km=args.satellite_height,
+        max_queue_size=args.max_queue_size,
+        packet_ttl=args.packet_ttl
+    )
+    
+    # 重置环境获取初始状态
+    env.reset()
+    
+    # 从channel模型中获取小区位置
+    cell_positions = env.channel_model.cell_positions
     
     # 将3D坐标投影到2D平面
     cell_positions_2d = []
@@ -453,48 +498,128 @@ def visualize_results(metrics, data, args):
     
     cell_positions_2d = np.array(cell_positions_2d)
     
-    # 绘制波束分配示例
-    # 这里使用随机生成的波束分配和功率分配作为示例
-    beam_allocation = np.random.randint(0, args.num_cells, size=args.num_beams)
-    power_allocation = np.random.uniform(0, 1, size=args.num_beams)
-    power_allocation = power_allocation / np.sum(power_allocation)  # 归一化
+    # 使用训练中保存的数据计算平均值并进行可视化
+    if metrics.get('beam_allocation_counts') is not None:
+        print("使用训练过程中记录的波束分配统计数据进行可视化...")
+        
+        # 从波束分配统计计数器计算概率分布
+        beam_allocation_counts = metrics['beam_allocation_counts']
+        
+        # 计算每个波束的概率分布
+        beam_allocation_probs = np.zeros_like(beam_allocation_counts)
+        avg_beam_allocation = np.zeros(args.num_beams, dtype=int)
+        
+        for beam_idx in range(args.num_beams):
+            total_counts = np.sum(beam_allocation_counts[beam_idx, :])
+            if total_counts > 0:
+                # 计算概率分布
+                beam_allocation_probs[beam_idx, :] = beam_allocation_counts[beam_idx, :] / total_counts
+                # 选择概率最高的小区作为该波束的代表分配
+                avg_beam_allocation[beam_idx] = np.argmax(beam_allocation_counts[beam_idx, :])
+            else:
+                # 如果没有统计数据，随机分配
+                avg_beam_allocation[beam_idx] = np.random.randint(0, args.num_cells)
+        
+        # 打印波束分配的概率分布
+        print("波束分配概率分布:")
+        for beam_idx in range(args.num_beams):
+            print(f"波束 {beam_idx+1}:")
+            for cell_idx in range(args.num_cells):
+                if beam_allocation_probs[beam_idx, cell_idx] > 0.01:  # 只显示概率大于1%的
+                    print(f"  小区 {cell_idx+1}: {beam_allocation_probs[beam_idx, cell_idx]:.3f}")
+        
+        # 计算平均功率分配
+        # 功率分配是连续值，可以直接取平均
+        power_allocations = np.array(metrics['power_allocations'])
+        avg_power_allocation = np.mean(power_allocations, axis=0)
+        
+        # 确保功率分配总和为1
+        avg_power_allocation = avg_power_allocation / np.sum(avg_power_allocation)
+        
+        # 计算平均信噪比
+        sinrs = np.array(metrics['sinrs'])
+        avg_sinr = np.mean(sinrs, axis=0)
+        
+        # 计算平均队列长度
+        queue_lengths_array = np.array(metrics['queue_lengths'])
+        avg_queue_lengths = np.mean(queue_lengths_array, axis=0)
+        
+        # 获取业务请求（从队列模型中）
+        traffic_demand = env.queue_model.get_queue_state()
+    else:
+        print("警告：训练数据中没有找到波束分配信息，使用随机策略...")
+        # 如果没有保存的数据，使用随机策略
+        avg_beam_allocation = np.random.randint(0, args.num_cells, size=args.num_beams)
+        avg_power_allocation = np.random.uniform(0, 1, size=args.num_beams)
+        avg_power_allocation = avg_power_allocation / np.sum(avg_power_allocation)  # 归一化
+        
+        # 随机生成SINR和队列长度
+        avg_sinr = np.random.uniform(-10, 30, size=args.num_cells)  # dB
+        avg_queue_lengths = np.random.randint(0, args.max_queue_size, size=args.num_cells)
+        
+        # 随机生成业务请求
+        traffic_demand = np.random.poisson(5, size=args.num_cells)
     
-    # 获取业务请求数据
-    traffic_demand = data['traffic_data'].get_traffic_data(3600)  # 使用1小时时间点的数据（秒级时间步）
+    # 绘制波束分配概率分布热力图
+    if 'beam_allocation_counts' in metrics:
+        plt.figure(figsize=(12, 8))
+        beam_allocation_counts = metrics['beam_allocation_counts']
+        
+        # 计算概率分布
+        beam_allocation_probs = np.zeros_like(beam_allocation_counts)
+        for beam_idx in range(args.num_beams):
+            total_counts = np.sum(beam_allocation_counts[beam_idx, :])
+            if total_counts > 0:
+                beam_allocation_probs[beam_idx, :] = beam_allocation_counts[beam_idx, :] / total_counts
+        
+        # 创建热力图
+        im = plt.imshow(beam_allocation_probs, cmap='Blues', aspect='auto', interpolation='nearest')
+        
+        # 添加文本标注
+        for beam_idx in range(args.num_beams):
+            for cell_idx in range(args.num_cells):
+                prob = beam_allocation_probs[beam_idx, cell_idx]
+                if prob > 0.01:  # 只显示概率大于1%的
+                    plt.text(cell_idx, beam_idx, f'{prob:.2f}', 
+                            ha='center', va='center', color='red' if prob > 0.5 else 'black')
+        
+        plt.colorbar(im, label='Selection Probability')
+        plt.xlabel('Cell Index')
+        plt.ylabel('Beam Index')
+        plt.title('Beam Allocation Probability Distribution')
+        plt.xticks(range(args.num_cells), [f'C{i+1}' for i in range(args.num_cells)])
+        plt.yticks(range(args.num_beams), [f'B{i+1}' for i in range(args.num_beams)])
+        plt.tight_layout()
+        plt.savefig(os.path.join(args.output_dir, 'beam_allocation_probability.png'))
+        plt.close()
     
     # 绘制波束分配
     Visualization.plot_beam_allocation(
-        beam_allocation=beam_allocation,
+        beam_allocation=avg_beam_allocation,
         cell_positions=cell_positions_2d,
-        power_allocation=power_allocation,
+        power_allocation=avg_power_allocation,
         traffic_demand=traffic_demand,
-        title='Beam Allocation'
+        title='Average Beam Allocation (Fixed Satellite Position)'
     )
     plt.savefig(os.path.join(args.output_dir, 'beam_allocation_fixed.png'))
     plt.close()
     
     # 绘制信噪比热力图
-    # 这里使用随机生成的信噪比作为示例
-    sinr = np.random.uniform(-10, 30, size=args.num_cells)  # dB
-    
     Visualization.plot_sinr_heatmap(
-        sinr=sinr,
+        sinr=avg_sinr,
         cell_positions=cell_positions_2d,
-        beam_allocation=beam_allocation,
-        title='SINR Heatmap (Fixed Satellite Position)'
+        beam_allocation=avg_beam_allocation,
+        title='Average SINR Heatmap (Fixed Satellite Position)'
     )
     plt.savefig(os.path.join(args.output_dir, 'sinr_heatmap_fixed.png'))
     plt.close()
     
     # 绘制队列状态
-    # 这里使用随机生成的队列长度作为示例
-    queue_lengths = np.random.randint(0, args.max_queue_size, size=args.num_cells)
-    
     Visualization.plot_queue_status(
-        queue_lengths=queue_lengths,
+        queue_lengths=avg_queue_lengths,
         cell_positions=cell_positions_2d,
         max_queue_size=args.max_queue_size,
-        title='Queue Status (Fixed Satellite Position)'
+        title='Average Queue Status (Fixed Satellite Position)'
     )
     plt.savefig(os.path.join(args.output_dir, 'queue_status_fixed.png'))
     plt.close()
@@ -532,7 +657,8 @@ def main():
     
     # 可视化结果
     print("Visualizing results...")
-    visualize_results(metrics, data, args)
+    # visualize_results(metrics, data, args)
+    visualize_results(metrics, None, args)
     
     print("Experiment completed.")
 
