@@ -17,7 +17,8 @@ class QueueModel:
                  packet_ttl: int = 10,
                  min_arrival_rate: float = 0.1,  # 最小到达率（数据包/时隙）
                  max_arrival_rate: float = 1.0,  # 最大到达率（数据包/时隙）
-                 packet_size_kb: float = 100.0):  # 数据包大小 (KB)
+                 packet_size_kb: float = 10.0,  # 数据包大小 (KB) - 调整为更合理的大小
+                 traffic_intensity: float = 0.5):  # 流量强度因子
         """
         初始化队列模型
         
@@ -28,6 +29,7 @@ class QueueModel:
             min_arrival_rate: 最小到达率（数据包/时隙）
             max_arrival_rate: 最大到达率（数据包/时隙）
             packet_size_kb: 数据包大小 (KB)
+            traffic_intensity: 流量强度因子 (0.0-1.0)，影响总体到达率
         """
         self.num_cells = num_cells
         self.max_queue_size = max_queue_size
@@ -35,6 +37,7 @@ class QueueModel:
         self.min_arrival_rate = min_arrival_rate
         self.max_arrival_rate = max_arrival_rate
         self.packet_size_kb = packet_size_kb
+        self.traffic_intensity = traffic_intensity
         
         # 初始化队列
         self.queues = [[] for _ in range(num_cells)]
@@ -64,12 +67,13 @@ class QueueModel:
         self.total_dropped = 0
         self.total_delay = 0
     
-    def update(self, data_rates):
+    def update(self, data_rates, sinr_values=None):
         """
         更新队列状态
         
         Args:
             data_rates: 数据率数组，单位：bits/s
+            sinr_values: 信噪比数组（可选，用于调试）
         
         Returns:
             served_packets: 服务的数据包数量
@@ -82,12 +86,32 @@ class QueueModel:
         total_delay = 0
         total_packets = 0
 
+        # 统计SINR和data_rate信息
+        if sinr_values is not None:
+            valid_sinr = sinr_values[sinr_values > 0]
+            valid_data_rates = data_rates[data_rates > 0]
+            if len(valid_sinr) > 0:
+                print(f"SINR统计: min={np.min(valid_sinr):.6f}, max={np.max(valid_sinr):.6f}, 平均={np.mean(valid_sinr):.6f}")
+                print(f"Data_rate统计: min={np.min(valid_data_rates):.0f}, max={np.max(valid_data_rates):.0f}, 平均={np.mean(valid_data_rates):.0f}")
+            else:
+                print("所有SINR为0或负值！")
+
         # 更新每个小区的队列
         for cell_idx in range(self.num_cells):
+            # 调试：打印数据率信息
+            if cell_idx < 3:  # 只打印前3个小区的信息
+                sinr_str = f", SINR={sinr_values[cell_idx]:.6f}" if sinr_values is not None else ""
+                queue_len = len(self.queues[cell_idx])
+                print(f"小区{cell_idx}: data_rate={data_rates[cell_idx]:.2f} bits/s{sinr_str}, packet_size={self.packet_size_kb} KB, 队列长度={queue_len}")
+            
             # 计算可以服务的数据包数量
             # 数据率单位：bits/s，数据包大小单位：KB
             # 假设时隙长度为1秒
-            max_serve = int(data_rates[cell_idx] / (self.packet_size_kb * 8 * 1000))
+            packet_size_bits = self.packet_size_kb * 8 * 1000  # KB转换为bits
+            max_serve = int(data_rates[cell_idx] / packet_size_bits) if packet_size_bits > 0 else 0
+            
+            if cell_idx < 3:  # 调试信息
+                print(f"小区{cell_idx}: packet_size_bits={packet_size_bits}, max_serve={max_serve}")
             
             # 服务队列中的数据包
             served = 0
@@ -181,6 +205,15 @@ class QueueModel:
         
         return queue_state
     
+    def get_queue_lengths(self):
+        """
+        获取队列长度数组
+        
+        Returns:
+            queue_lengths: 队列长度数组
+        """
+        return np.array([len(queue) for queue in self.queues])
+    
     def _initialize_arrival_rates(self):
         """
         初始化到达率
@@ -199,11 +232,17 @@ class QueueModel:
             # 距离越远，到达率越小
             distances[cell_idx] = cell_idx / self.num_cells
         
-        # 根据距离计算到达率
-        arrival_rates = self.max_arrival_rate - distances * (self.max_arrival_rate - self.min_arrival_rate)
+        # 根据距离计算基础到达率
+        base_arrival_rates = self.max_arrival_rate - distances * (self.max_arrival_rate - self.min_arrival_rate)
+        
+        # 应用流量强度因子
+        arrival_rates = base_arrival_rates * self.traffic_intensity
         
         # 添加随机变化
         arrival_rates = arrival_rates * (0.8 + 0.4 * np.random.random(self.num_cells))
+        
+        # 确保在合理范围内
+        arrival_rates = np.clip(arrival_rates, self.min_arrival_rate, self.max_arrival_rate)
         
         return arrival_rates
     
@@ -224,6 +263,16 @@ class QueueModel:
                 self.min_arrival_rate,
                 self.max_arrival_rate
             )
+    
+    def set_traffic_intensity(self, traffic_intensity: float):
+        """
+        设置流量强度并重新初始化到达率
+        
+        Args:
+            traffic_intensity: 新的流量强度因子 (0.0-1.0)
+        """
+        self.traffic_intensity = np.clip(traffic_intensity, 0.0, 1.0)
+        self.arrival_rates = self._initialize_arrival_rates()
     
     def get_performance_metrics(self):
         """

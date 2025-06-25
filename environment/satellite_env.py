@@ -20,12 +20,13 @@ class SatelliteEnv(gym.Env):
                  num_beams: int = 4, 
                  num_cells: int = 19, 
                  total_power_dbw: float = 39.0,
-                 total_bandwidth_mhz: float = 40.0,
+                 total_bandwidth_mhz: float = 200.0,
                  satellite_height_km: float = 550.0,
                  max_queue_size: int = 100,
-                 packet_ttl: int = 10,
+                 packet_ttl: int = 12,
                  reward_throughput_weight: float = 0.85,
-                 reward_delay_weight: float = 0.15):
+                 reward_delay_weight: float = 0.15,
+                 traffic_intensity: float = 0.7):
         """
         初始化卫星环境
         
@@ -39,6 +40,7 @@ class SatelliteEnv(gym.Env):
             packet_ttl: 数据包生存时间(时隙)
             reward_throughput_weight: 吞吐量奖励权重
             reward_delay_weight: 延迟奖励权重
+            traffic_intensity: 流量强度因子 (0.0-1.0)
         """
         super(SatelliteEnv, self).__init__()
         
@@ -52,6 +54,12 @@ class SatelliteEnv(gym.Env):
         self.packet_ttl = packet_ttl
         self.reward_throughput_weight = reward_throughput_weight
         self.reward_delay_weight = reward_delay_weight
+        self.traffic_intensity = traffic_intensity
+        self.max_queue_size = max_queue_size
+        self.packet_ttl = packet_ttl
+        self.reward_throughput_weight = reward_throughput_weight
+        self.reward_delay_weight = reward_delay_weight
+        self.traffic_intensity = traffic_intensity
         
         # 创建信道模型
         self.channel_model = ChannelModel(
@@ -60,11 +68,12 @@ class SatelliteEnv(gym.Env):
             satellite_height_km=satellite_height_km
         )
         
-        # 创建队列模型
+        # 创建队列模型（传入traffic_intensity参数）
         self.queue_model = QueueModel(
             num_cells=num_cells,
             max_queue_size=max_queue_size,
-            packet_ttl=packet_ttl
+            packet_ttl=packet_ttl,
+            traffic_intensity=traffic_intensity
         )
         
         # 定义观测空间
@@ -181,11 +190,10 @@ class SatelliteEnv(gym.Env):
         
         # 获取新的业务请求状态
         self.traffic_requests = self.queue_model.get_queue_state()
-
-        # print(self.traffic_requests)
         
-        # 计算奖励
-        reward = self._calculate_reward(served_packets, avg_delay, dropped_packets)
+        # 计算奖励 - 使用改进的奖励函数
+        queue_lengths = self.queue_model.get_queue_lengths()
+        reward = self._calculate_reward_improved(served_packets, avg_delay, dropped_packets, data_rates, queue_lengths)
         
         # 更新性能指标
         throughput = np.sum(served_packets)  # 总吞吐量（服务的数据包数量）
@@ -344,6 +352,114 @@ class SatelliteEnv(gym.Env):
         
         return reward
     
+    def _calculate_reward_improved(self, served_packets, avg_delay, dropped_packets, data_rates, queue_lengths):
+        """
+        改进的奖励计算函数 - 为PPO训练优化
+        
+        Args:
+            served_packets: 服务的数据包数量
+            avg_delay: 平均延迟
+            dropped_packets: 丢弃的数据包数量
+            data_rates: 各小区数据速率
+            queue_lengths: 队列长度
+        
+        Returns:
+            reward: 改进的奖励值
+        """
+        # 1. 吞吐量奖励（主要奖励）
+        total_served = np.sum(served_packets)
+        # 归一化吞吐量奖励 - 相对于每个小区的最大可能服务量
+        max_possible_served = self.num_cells * 5  # 假设每个小区最多服务5个包
+        throughput_reward = (total_served / max_possible_served) * 10.0
+        
+        # 2. 延迟惩罚（强化学习需要明确的负反馈）
+        if avg_delay > 0:
+            # 归一化延迟惩罚 - 超过一定阈值时急剧增加惩罚
+            delay_threshold = self.packet_ttl * 0.5  # 阈值为TTL的一半
+            if avg_delay > delay_threshold:
+                delay_penalty = ((avg_delay - delay_threshold) / delay_threshold) * 5.0
+            else:
+                delay_penalty = (avg_delay / delay_threshold) * 1.0
+        else:
+            delay_penalty = 0
+        
+        # 3. 丢包惩罚（严重惩罚，因为这直接影响QoS）
+        if dropped_packets > 0:
+            # 每丢一个包惩罚2.0，鼓励避免丢包
+            drop_penalty = dropped_packets * 2.0
+        else:
+            drop_penalty = 0
+        
+        # 4. 数据率奖励（鼓励高数据传输速率）
+        if len(data_rates) > 0 and np.sum(data_rates) > 0:
+            # 归一化数据率，避免数值过大
+            avg_data_rate = np.mean(data_rates)
+            # 假设最大数据率约为1e8 bits/s，归一化到0-3范围
+            rate_reward = min(3.0, avg_data_rate / 1e8 * 3.0)
+        else:
+            rate_reward = 0
+        
+        # 5. 公平性奖励（鼓励资源均匀分配）
+        if len(data_rates) > 1 and np.sum(data_rates) > 0:
+            try:
+                from utils.metrics import Metrics
+                fairness_index = Metrics.calculate_fairness_index(data_rates)
+                fairness_reward = fairness_index * 2.0  # 公平性权重
+            except:
+                fairness_reward = 0
+        else:
+            fairness_reward = 0
+        
+        # 6. 队列管理奖励（鼓励有效的队列管理）
+        if len(queue_lengths) > 0:
+            # 队列空置率 - 鼓励清空队列但不要完全空置
+            avg_queue_length = np.mean(queue_lengths)
+            optimal_queue_length = self.max_queue_size * 0.3  # 最优队列长度为30%
+            
+            if avg_queue_length <= optimal_queue_length:
+                queue_reward = 1.0  # 队列在理想范围内
+            else:
+                # 队列过长时的惩罚
+                overflow_ratio = (avg_queue_length - optimal_queue_length) / (self.max_queue_size - optimal_queue_length)
+                queue_reward = max(0, 1.0 - overflow_ratio * 2.0)
+        else:
+            queue_reward = 0
+        
+        # 7. 稳定性奖励（鼓励稳定的性能）
+        if len(data_rates) > 1:
+            # 减少数据率的方差，鼓励稳定的服务
+            rate_std = np.std(data_rates)
+            max_std = np.mean(data_rates) if np.mean(data_rates) > 0 else 1.0
+            stability_reward = max(0, 1.0 - rate_std / max_std)
+        else:
+            stability_reward = 0
+        
+        # 综合奖励计算 - 仔细平衡各项权重
+        reward = (
+            throughput_reward * 3.0 +        # 吞吐量是最重要的（权重3.0）
+            rate_reward * 2.0 +              # 数据率奖励（权重2.0）
+            fairness_reward * 1.0 +          # 公平性奖励（权重1.0）
+            queue_reward * 1.5 +             # 队列管理奖励（权重1.5）
+            stability_reward * 0.5 -         # 稳定性奖励（权重0.5）
+            delay_penalty -                  # 延迟惩罚
+            drop_penalty                     # 丢包惩罚
+        )
+        
+        # 确保奖励在合理范围内
+        reward = np.clip(reward, -50.0, 50.0)
+        
+        return reward
+    
+    def set_traffic_intensity(self, traffic_intensity: float):
+        """
+        动态设置流量强度
+        
+        Args:
+            traffic_intensity: 新的流量强度因子 (0.0-1.0)
+        """
+        self.traffic_intensity = np.clip(traffic_intensity, 0.0, 1.0)
+        self.queue_model.set_traffic_intensity(self.traffic_intensity)
+    
     def render(self, mode='human'):
         """
         渲染环境
@@ -371,3 +487,25 @@ class SatelliteEnv(gym.Env):
             'avg_delay': np.mean(self.delay_history) if self.delay_history else 0,
             'avg_packet_loss': np.mean(self.packet_loss_history) if self.packet_loss_history else 0
         }
+    
+    def get_traffic_demand(self):
+        """
+        获取当前流量需求
+        
+        Returns:
+            traffic_demand: 每个小区的流量需求数组
+        """
+        if self.traffic_requests is not None:
+            return np.array(self.traffic_requests)
+        else:
+            # 如果还没有流量请求，返回零数组
+            return np.zeros(self.num_cells)
+    
+    def get_queue_lengths(self):
+        """
+        获取当前队列长度
+        
+        Returns:
+            queue_lengths: 每个小区的队列长度数组
+        """
+        return self.queue_model.get_queue_state()
