@@ -64,8 +64,30 @@ class DiscreteActor(nn.Module):
         # 将动作概率堆叠起来
         action_logits = torch.stack(action_logits, dim=1)
         
+        # 检查logits是否包含NaN或Inf
+        if torch.any(torch.isnan(action_logits)) or torch.any(torch.isinf(action_logits)):
+            print(f"Warning: NaN/Inf detected in action_logits: {action_logits}")
+            # 用小的随机值替换NaN/Inf
+            action_logits = torch.where(
+                torch.isnan(action_logits) | torch.isinf(action_logits),
+                torch.randn_like(action_logits) * 0.01,
+                action_logits
+            )
+        
+        # 数值稳定的softmax：先减去最大值
+        action_logits_stable = action_logits - torch.max(action_logits, dim=-1, keepdim=True)[0]
+        
         # 应用softmax获取概率分布
-        action_probs = F.softmax(action_logits, dim=-1)  # 使用-1表示最后一个维度，更安全
+        action_probs = F.softmax(action_logits_stable, dim=-1)
+        
+        # 检查概率是否包含NaN
+        if torch.any(torch.isnan(action_probs)):
+            print(f"Warning: NaN detected in action_probs after softmax")
+            # 设置为均匀分布
+            action_probs = torch.ones_like(action_probs) / action_probs.size(-1)
+        
+        # 确保概率总和为1（数值稳定性）
+        action_probs = action_probs / (action_probs.sum(dim=-1, keepdim=True) + 1e-8)
         
         return action_probs
 
@@ -123,13 +145,55 @@ class ContinuousActor(nn.Module):
         # 提取特征
         features = self.feature_extractor(state)
         
-        # 计算均值
-        mean = torch.sigmoid(self.mean_layer(features))  # 使用sigmoid确保在[0,1]范围内
+        # 检查特征是否包含NaN
+        if torch.any(torch.isnan(features)):
+            print(f"Warning: NaN detected in continuous actor features")
+            print(f"State shape: {state.shape}, State mean: {state.mean()}, State std: {state.std()}")
+            # 用小的随机值替换NaN
+            features = torch.where(
+                torch.isnan(features),
+                torch.randn_like(features) * 0.01,
+                features
+            )
+        
+        # 计算均值（使用tanh而不是sigmoid以避免饱和）
+        mean_logits = self.mean_layer(features)
+        # 检查均值logits是否包含NaN
+        if torch.any(torch.isnan(mean_logits)):
+            print(f"Warning: NaN detected in mean_logits")
+            mean_logits = torch.where(
+                torch.isnan(mean_logits),
+                torch.zeros_like(mean_logits),
+                mean_logits
+            )
+        
+        # 使用tanh激活并缩放到[0,1]范围，避免sigmoid的数值问题
+        mean = (torch.tanh(mean_logits) + 1.0) / 2.0  # 将[-1,1]映射到[0,1]
         
         # 计算标准差
         log_std = self.log_std_layer(features)
+        # 检查log_std是否包含NaN
+        if torch.any(torch.isnan(log_std)):
+            print(f"Warning: NaN detected in log_std")
+            log_std = torch.where(
+                torch.isnan(log_std),
+                torch.ones_like(log_std) * (-2.0),  # 默认较小的标准差
+                log_std
+            )
+        
         log_std = torch.clamp(log_std, -20, 2)  # 限制标准差范围
         std = torch.exp(log_std)
+        
+        # 最终检查输出是否包含NaN
+        if torch.any(torch.isnan(mean)) or torch.any(torch.isnan(std)):
+            print(f"Warning: NaN in final continuous actor output")
+            print(f"Mean NaN count: {torch.isnan(mean).sum()}")
+            print(f"Std NaN count: {torch.isnan(std).sum()}")
+            # 设置为安全的默认值
+            if torch.any(torch.isnan(mean)):
+                mean = torch.where(torch.isnan(mean), torch.tensor(0.5, device=mean.device), mean)
+            if torch.any(torch.isnan(std)):
+                std = torch.where(torch.isnan(std), torch.tensor(0.1, device=std.device), std)
         
         return mean, std
 

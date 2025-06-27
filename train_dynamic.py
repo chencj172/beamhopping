@@ -10,6 +10,10 @@ from tqdm import tqdm
 import os
 import sys
 
+# 设置matplotlib中文字体
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
 # 添加当前目录到路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -17,7 +21,7 @@ from environment.dynamic_satellite_env import DynamicSatelliteEnv
 from rl.ppo import PPO
 from algorithms.baseline_algorithms import GreedyAlgorithm, RandomAlgorithm
 
-def create_env(complexity_level='complex', traffic_intensity=0.7):
+def create_env(complexity_level='complex', traffic_intensity=0.8):
     """创建指定复杂度的环境"""
     if complexity_level == 'simple':
         env = DynamicSatelliteEnv(
@@ -41,7 +45,7 @@ def create_env(complexity_level='complex', traffic_intensity=0.7):
         )
     else:  # complex
         env = DynamicSatelliteEnv(
-            num_beams=4,
+            num_beams=3,
             num_cells=19,
             enable_channel_dynamics=True,
             enable_traffic_dynamics=True,
@@ -101,7 +105,7 @@ def evaluate_algorithm(env, algorithm, num_episodes=10):
         'fairness_std': np.std(total_fairness)
     }
 
-def train_ppo_dynamic(complexity_level='complex', episodes=1000, traffic_intensity=0.7):
+def train_ppo_dynamic(complexity_level='complex', episodes=1000, traffic_intensity=0.8):
     """在动态环境中训练PPO"""
     print(f"开始在{complexity_level}复杂度环境中训练PPO...")
       # 创建环境
@@ -112,15 +116,15 @@ def train_ppo_dynamic(complexity_level='complex', episodes=1000, traffic_intensi
     
     agent = PPO(
         state_dim=obs_dim,
-        discrete_action_dim=env.num_beams,  # beam allocation
-        continuous_action_dim=env.num_beams,  # power allocation  
+        discrete_action_dim=env.num_beams,
+        continuous_action_dim=env.num_beams,
         discrete_action_space_size=env.num_cells,
-        lr_actor=3e-4,
-        lr_critic=1e-3,
-        gamma=0.99,
-        clip_ratio=0.2,
-        entropy_coef=0.01,
-        update_epochs=4
+        lr_actor=2e-4,
+        lr_critic=5e-4,
+        gamma=0.995,
+        clip_ratio=0.15,
+        entropy_coef=0.005,
+        update_epochs=6
     )
       # 训练统计
     episode_rewards = []
@@ -140,19 +144,19 @@ def train_ppo_dynamic(complexity_level='complex', episodes=1000, traffic_intensi
         # 每50个episode打印一次详细的初始环境状态
         if (episode + 1) % 50 == 0:
             print(f"\n--- Episode {episode + 1} 初始环境状态 ---")
-            print(f"天气严重性: {env.env_state.get('weather_severity', 0):.3f}")
-            print(f"流量突发性: {env.env_state.get('traffic_burstiness', 0):.3f}")
-            print(f"信道质量: {env.env_state.get('channel_quality', 1):.3f}")
+            print(f"天气严重性: {env.env_state.get('weather_severity', 0):.10f}")
+            print(f"流量突发性: {env.env_state.get('traffic_burstiness', 0):.10f}")
+            print(f"信道质量: {env.env_state.get('channel_quality', 1):.10f}")
             
             # 显示前5个小区的详细信息
             current_traffic = env.queue_model.get_current_traffic()
             current_channels = env.channel_model.get_current_channel_state()
             print("前5个小区状态:")
             for i in range(min(5, len(current_traffic))):
-                print(f"  小区{i}: 业务请求={current_traffic[i]:.2f}, 信道质量={current_channels[i]:.3f}")
+                print(f"  小区{i}: 业务请求={current_traffic[i]:.2f}, 信道质量={current_channels[i]:.10f}")
             print("=" * 40)
         
-        while episode_steps < 1000:  # 限制每个episode的最大步数
+        while episode_steps < 200:  # 限制每个episode的最大步数
             # 选择动作
             action, discrete_log_prob, continuous_log_prob, state_value = agent.select_action(obs)
             
@@ -176,22 +180,6 @@ def train_ppo_dynamic(complexity_level='complex', episodes=1000, traffic_intensi
             
             obs = next_obs
             episode_steps += 1
-
-            # if(episode_steps % 100 == 0):
-            #     # 打印当前环境动态信息
-            #     print("  当前环境状态:")
-            #     print(f"    天气严重性: {env.env_state.get('weather_severity', 0):.3f}")
-            #     print(f"    流量突发性: {env.env_state.get('traffic_burstiness', 0):.3f}")
-            #     print(f"    信道质量: {env.env_state.get('channel_quality', 1):.3f}")
-                
-            #     # 打印小区业务请求量
-            #     current_traffic = env.queue_model.get_current_traffic()
-            #     print(f"    小区业务请求量 (前10个): {current_traffic[:10]}")
-            #     print(f"    业务请求量统计: 最小={np.min(current_traffic):.2f}, 最大={np.max(current_traffic):.2f}, 平均={np.mean(current_traffic):.2f}")
-            
-            #     # 打印信道条件
-            #     current_channels = env.channel_model.get_current_channel_state()
-            #     print(f"    信道条件 (前10个): {current_channels[:10]}")
             
             if done:
                 break        # 更新智能体
@@ -282,7 +270,7 @@ def train_ppo_dynamic(complexity_level='complex', episodes=1000, traffic_intensi
         'complexity': episode_complexity
     }
 
-def evaluate_all_algorithms(complexity_level='complex', num_episodes=20, traffic_intensity=0.7):
+def evaluate_all_algorithms(complexity_level='complex', num_episodes=20, traffic_intensity=0.8):
     """评估所有算法在指定复杂度环境下的性能"""
     print(f"在{complexity_level}复杂度环境中评估所有算法...")
     
@@ -299,9 +287,9 @@ def evaluate_all_algorithms(complexity_level='complex', num_episodes=20, traffic
     # 评估随机算法
     print("评估随机算法...")
     random_alg = RandomAlgorithm(num_beams=env.num_beams, num_cells=env.num_cells)
-    results['Random'] = evaluate_algorithm(env, random_alg, num_episodes)
-      # 评估PPO（如果已训练）
+    results['Random'] = evaluate_algorithm(env, random_alg, num_episodes)    # 评估PPO（如果已训练）
     model_path = f'dynamic_models/ppo_best_{complexity_level}.pt'
+    # model_path = f'improved_models/ppo_model_best.pt'
     if os.path.exists(model_path):
         print("评估PPO...")
         obs_dim = env.observation_space.shape[0]
@@ -316,6 +304,9 @@ def evaluate_all_algorithms(complexity_level='complex', num_episodes=20, traffic
         results['PPO'] = evaluate_algorithm(env, ppo_agent, num_episodes)
     else:
         print(f"PPO模型不存在: {model_path}")
+    
+    # 绘制性能对比图
+    plot_algorithm_performance(results, complexity_level)
     
     return results
 
@@ -396,6 +387,84 @@ def compare_complexity_levels():
     
     return comparison_results
 
+def plot_algorithm_performance(results, complexity_level='complex'):
+    """
+    绘制算法性能对比图
+    
+    Args:
+        results: 评估结果字典
+        complexity_level: 复杂度等级
+    """
+    if not results:
+        print("没有评估结果可以绘制")
+        return
+    
+    algorithms = list(results.keys())
+    metrics = ['reward', 'throughput', 'delay', 'fairness']
+    
+    # 创建2x2的子图
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f'{complexity_level.upper()}环境下算法性能对比', fontsize=16, fontweight='bold')
+    
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']  # 蓝、橙、绿、红
+    
+    for i, metric in enumerate(metrics):
+        ax = axes[i // 2, i % 2]
+        
+        # 准备数据
+        values = []
+        errors = []
+        labels = []
+        
+        for alg in algorithms:
+            if metric in results[alg]:
+                values.append(results[alg][metric])
+                errors.append(results[alg].get(f'{metric}_std', 0))
+                labels.append(alg)
+        
+        if not values:
+            continue
+            
+        # 绘制柱状图
+        bars = ax.bar(labels, values, yerr=errors, capsize=5, 
+                     color=colors[:len(labels)], alpha=0.8)
+        
+        # 在柱子上添加数值标签
+        for j, (bar, value, error) in enumerate(zip(bars, values, errors)):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + error,
+                   f'{value:.3f}', ha='center', va='bottom', fontsize=10)
+        
+        ax.set_ylabel(metric.replace('_', ' ').title())
+        ax.set_title(f'{metric.replace("_", " ").title()} compare')
+        ax.grid(True, alpha=0.3)
+        
+        # 设置Y轴范围
+        if metric == 'fairness':
+            ax.set_ylim(0, 1.1)
+        elif metric == 'delay':
+            ax.set_ylim(bottom=0)
+    
+    plt.tight_layout()
+    
+    # 保存图像
+    os.makedirs('evaluation_results', exist_ok=True)
+    plt.savefig(f'evaluation_results/algorithm_comparison_3{complexity_level}.png', 
+                dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    # 打印数值结果
+    print(f"\n{complexity_level.upper()}环境算法性能详细结果:")
+    print("=" * 60)
+    for alg in algorithms:
+        print(f"\n{alg}:")
+        print("-" * 30)
+        for metric in metrics:
+            if metric in results[alg]:
+                value = results[alg][metric]
+                std = results[alg].get(f'{metric}_std', 0)
+                print(f"  {metric:>12}: {value:.3f} ± {std:.3f}")
+
 def main():
     """主函数"""
     print("动态卫星环境训练与评估")
@@ -425,9 +494,9 @@ def main():
     elif choice == '2':
         train_ppo_dynamic('medium', episodes=800)
     elif choice == '3':
-        train_ppo_dynamic('complex', episodes=1000)
+        train_ppo_dynamic('complex', episodes=2000)
     elif choice == '4':
-        results = evaluate_all_algorithms('complex', num_episodes=20)
+        results = evaluate_all_algorithms('complex', num_episodes=100)
         print("评估结果:", results)
     elif choice == '5':
         compare_complexity_levels()

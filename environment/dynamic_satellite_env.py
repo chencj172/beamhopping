@@ -70,8 +70,8 @@ class DynamicChannelModel(ChannelModel):
         self.current_time += 1
         
         # 更新卫星位置
-        if self.satellite_movement_enabled:
-            self._update_satellite_position()
+        # if self.satellite_movement_enabled:
+        #     self._update_satellite_position()
         
         # 更新信道衰落
         if self.fading_enabled:
@@ -191,7 +191,7 @@ class DynamicChannelModel(ChannelModel):
             for cell_idx in range(self.num_cells):
                 # 基础增益（线性值）
                 base_gain = self.channel_gains[beam_idx, cell_idx]
-                
+                # print("beam_idx: ",beam_idx, ", cell_idx: ", cell_idx, "==>", base_gain)
                 # 应用多径衰落
                 fading_factor = self.fading_state[beam_idx, cell_idx]
                 
@@ -205,6 +205,7 @@ class DynamicChannelModel(ChannelModel):
                 self.channel_gains[beam_idx, cell_idx] = (
                     base_gain * fading_factor * shadowing_factor * weather_factor
                 )
+                # print("beam_idx: ",beam_idx, ", cell_idx: ", cell_idx, "==>", self.channel_gains[beam_idx, cell_idx])
     def set_weather_conditions(self, rain_rate: float, cloud_attenuation: float):
         """设置天气条件"""
         self.rain_rate = rain_rate
@@ -271,8 +272,8 @@ class DynamicQueueModel(QueueModel):
         self._update_traffic_pattern()
         
         # 更新用户分布
-        if self.user_mobility_enabled:
-            self._update_user_distribution()
+        # if self.user_mobility_enabled:
+        #     self._update_user_distribution()
         
         # 更新突发状态
         self._update_burst_state()
@@ -382,8 +383,8 @@ class DynamicSatelliteEnv(gym.Env):
                  total_power_dbw: float = 39.0,
                  total_bandwidth_mhz: float = 200.0,
                  satellite_height_km: float = 550.0,
-                 max_queue_size: int = 100,
-                 packet_ttl: int = 12,
+                 max_queue_size: int = 1000,
+                 packet_ttl: int = 10,
                  traffic_intensity: float = 0.7,
                  # 新增动态参数
                  enable_channel_dynamics: bool = True,
@@ -412,14 +413,13 @@ class DynamicSatelliteEnv(gym.Env):
         self.enable_traffic_dynamics = enable_traffic_dynamics
         self.enable_weather = enable_weather
         self.enable_mobility = enable_mobility
-        
-        # 奖励权重
+          # 奖励权重
         if reward_weights is None:
             self.reward_weights = {
-                'throughput': 0.4,
-                'delay': 0.25,
-                'fairness': 0.2,
-                'energy_efficiency': 0.15
+                'throughput': 0.35,      # 减少吞吐量权重
+                'delay': 0.40,           # 大幅增加延迟权重
+                'fairness': 0.15,        # 减少公平性权重
+                'energy_efficiency': 0.10 # 减少能效权重
             }
         else:
             self.reward_weights = reward_weights
@@ -485,7 +485,8 @@ class DynamicSatelliteEnv(gym.Env):
         self.env_state = {
             'weather_severity': 0.0,
             'traffic_burstiness': 0.0,
-            'channel_quality': 1.0        }
+            'channel_quality': 1.0        
+        }
     
     def reset(self):
         """重置环境"""
@@ -526,6 +527,9 @@ class DynamicSatelliteEnv(gym.Env):
         beam_allocation = np.array(action['beam_allocation']).flatten()
         power_allocation = np.array(action['power_allocation']).flatten()
         
+        # print("=======================")
+        # print(beam_allocation)
+        
         # 确保beam_allocation长度正确
         if len(beam_allocation) != self.num_beams:
             # 如果长度不正确，使用随机分配或重复/截断
@@ -540,20 +544,56 @@ class DynamicSatelliteEnv(gym.Env):
         
         # 确保beam_allocation值在有效范围内
         beam_allocation = np.clip(beam_allocation, 0, self.num_cells - 1).astype(int)
-        
-        # 确保动作有效性
+          # 确保动作有效性
         if len(power_allocation) != self.num_beams:
             power_allocation = np.ones(self.num_beams) / self.num_beams
         
-        power_allocation = np.maximum(power_allocation, 0.0)
+        # 强制将功率分配约束到[0,1]范围
+        power_allocation = np.array(power_allocation).flatten()
+        power_allocation = np.clip(power_allocation, 0.0, 1.0)  # 硬约束到[0,1]
+        
+        # 归一化功率分配（确保总和为1）
         power_sum = np.sum(power_allocation)
-        power_allocation = power_allocation / power_sum if power_sum > 0 else np.ones(self.num_beams) / self.num_beams
+        if power_sum > 1e-8:
+            power_allocation = power_allocation / power_sum
+        else:
+            power_allocation = np.ones(self.num_beams) / self.num_beams
+        
+        # 最终检查：确保所有值都是非负的
+        power_allocation = np.maximum(power_allocation, 0.0)
+        
+        # print(f"调试信息 - 波束分配: {beam_allocation}, 功率分配: {power_allocation}")
         
         # 计算实际功率分配
         actual_power = power_allocation * self.total_power_linear
-        
-        # 计算信噪比和数据率
-        sinr, data_rates = self._calculate_sinr_and_data_rates(beam_allocation, actual_power)
+          # 计算信噪比和数据率
+        try:
+            sinr, data_rates = self._calculate_sinr_and_data_rates(beam_allocation, actual_power)
+            
+            # 检查返回值是否有效
+            if sinr is None or data_rates is None:
+                print(f"Warning: _calculate_sinr_and_data_rates returned None")
+                print(f"beam_allocation: {beam_allocation}")
+                print(f"actual_power: {actual_power}")
+                print(f"channel_gains shape: {self.channel_gains.shape}")
+                # 使用默认值
+                sinr = np.ones(self.num_cells) * 0.1
+                data_rates = np.ones(self.num_cells) * 1e6  # 1 Mbps per cell
+            
+            # 检查NaN值
+            if np.any(np.isnan(sinr)) or np.any(np.isnan(data_rates)):
+                print(f"Warning: NaN detected in SINR or data rates")
+                print(f"SINR NaN count: {np.isnan(sinr).sum()}")
+                print(f"Data rates NaN count: {np.isnan(data_rates).sum()}")
+                # 替换NaN值
+                sinr = np.where(np.isnan(sinr), 0.1, sinr)
+                data_rates = np.where(np.isnan(data_rates), 1e6, data_rates)
+                
+        except Exception as e:
+            print(f"Error in _calculate_sinr_and_data_rates: {e}")
+            # 使用安全的默认值
+            sinr = np.ones(self.num_cells) * 0.1
+            data_rates = np.ones(self.num_cells) * 1e6
           # 更新队列状态
         served_packets, dropped_packets, avg_delay = self.queue_model.update(data_rates, sinr)
         
@@ -620,8 +660,7 @@ class DynamicSatelliteEnv(gym.Env):
             queue_state,
             queue_lengths,
             np.array([avg_throughput, avg_delay]),
-            env_state_vector
-        ])
+            env_state_vector        ])
         
         return observation.astype(np.float32)
     
@@ -643,6 +682,27 @@ class DynamicSatelliteEnv(gym.Env):
         
         # 确保beam_allocation是一维数组
         beam_allocation = np.array(beam_allocation).flatten()
+        
+        # 检查输入参数
+        if len(beam_allocation) != self.num_beams or len(power_allocation) != self.num_beams:
+            print(f"Warning: Invalid input dimensions in _calculate_sinr_and_data_rates")
+            print(f"beam_allocation length: {len(beam_allocation)}, expected: {self.num_beams}")
+            print(f"power_allocation length: {len(power_allocation)}, expected: {self.num_beams}")
+            return sinr, data_rates
+        
+        # 检查channel_gains是否有效
+        if self.channel_gains is None or self.channel_gains.shape != (self.num_beams, self.num_cells):
+            print(f"Warning: Invalid channel gains in _calculate_sinr_and_data_rates")
+            if self.channel_gains is not None:
+                print(f"Channel gains shape: {self.channel_gains.shape}")
+            return sinr, data_rates
+        
+        # 检查channel_gains是否有效
+        if self.channel_gains is None or self.channel_gains.shape != (self.num_beams, self.num_cells):
+            print(f"Warning: Invalid channel gains in _calculate_sinr_and_data_rates")
+            if self.channel_gains is not None:
+                print(f"Channel gains shape: {self.channel_gains.shape}")
+            return sinr, data_rates
         
         # 噪声功率密度 (dBW/Hz)
         noise_power_density_dbw_hz = -174 - 30  # -174 dBm/Hz 转换为 dBW/Hz（-30dB是mW到W的转换）
@@ -690,26 +750,41 @@ class DynamicSatelliteEnv(gym.Env):
                         beam_power_float = float(beam_power)
                         beam_gain_float = float(self.channel_gains[beam_idx, cell_idx])
                         interference_power += beam_power_float * beam_gain_float
-                
-                # 计算信噪比（确保是标量值）
+                  # 计算信噪比（确保是标量值）
+
                 sinr[cell_idx] = signal_power / (interference_power + thermal_noise)
-                # 只在前5个时间步打印调试信息，避免过多输出
-                # print(f"Cell {cell_idx}: SINR={sinr[cell_idx]:.4f}, Signal={signal_power:.4e}, Interference={interference_power:.4e}, Noise={noise_power:.4e}")
+                # print(signal_power, "==>", interference_power)
                 # 计算数据率 (Shannon公式，bits/s)
                 data_rates[cell_idx] = bandwidth_hz * np.log2(1 + sinr[cell_idx])
+                # print(f"Cell {cell_idx}: SINR={sinr[cell_idx]:.4f}, data_rates={data_rates[cell_idx]:.4e}, signal_power={signal_power:.4e}, interference_power={interference_power:.4e}")
+        
         return sinr, data_rates
-    
     def _calculate_multi_objective_reward(self, served_packets, avg_delay, dropped_packets, 
                                         data_rates, power_allocation):
         """计算多目标奖励函数"""
-        # 吞吐量奖励（归一化）
+        # 吞吐量奖励（使用对数缩放，避免固定最大值假设）
         total_throughput = np.sum(served_packets)
-        max_possible_throughput = self.num_cells * 10  # 假设最大每个小区10个包
-        throughput_reward = total_throughput / max_possible_throughput
+        if total_throughput > 0:
+            # 使用对数缩放，鼓励更高的吞吐量，但收益递减
+            throughput_reward = np.log(1 + total_throughput) / np.log(1 + self.num_cells * 2)
+        else:
+            throughput_reward = 0.0
         
-        # 延迟奖励（越小越好）
+        # 改进的延迟奖励（非线性惩罚）
         max_delay = self.packet_ttl
-        delay_reward = 1.0 - min(avg_delay / max_delay, 1.0)
+        if avg_delay > 0:
+            # 使用指数惩罚，延迟越高惩罚越重
+            delay_penalty = np.exp(avg_delay / max_delay) - 1
+            delay_reward = 1.0 / (1.0 + delay_penalty)
+        else:
+            delay_reward = 1.0
+        
+        # 队列长度惩罚（新增）
+        current_queue_lengths = self.queue_model.get_queue_lengths()
+        total_queue_length = np.sum(current_queue_lengths)
+        max_total_queue = self.num_cells * self.max_queue_size
+        queue_penalty = total_queue_length / max_total_queue
+        queue_reward = 1.0 - queue_penalty
         
         # 公平性奖励（Jain's fairness index）
         if np.sum(served_packets) > 0:
@@ -717,27 +792,32 @@ class DynamicSatelliteEnv(gym.Env):
         else:
             fairness_reward = 1.0
         
-        # 能效奖励（吞吐量/功率）
+        # 能效奖励（简化，避免依赖固定最大值）
         total_power = np.sum(power_allocation)
         if total_power > 0 and total_throughput > 0:
+            # 直接使用吞吐量与功率的比值，再用sigmoid函数归一化
             energy_efficiency = total_throughput / total_power
-            # 归一化能效
-            max_efficiency = max_possible_throughput / (self.num_beams * 0.1)  # 假设最小功率0.1
-            energy_efficiency_reward = min(energy_efficiency / max_efficiency, 1.0)
+            energy_efficiency_reward = 2.0 / (1.0 + np.exp(-energy_efficiency / 10)) - 1.0  # sigmoid归一化到[0,1]
         else:
             energy_efficiency_reward = 0.0
         
-        # 组合奖励
+        # 组合奖励（加入队列长度因子）
         reward = (
             self.reward_weights['throughput'] * throughput_reward +
-            self.reward_weights['delay'] * delay_reward +
+            self.reward_weights['delay'] * delay_reward * queue_reward +  # 延迟和队列长度组合
             self.reward_weights['fairness'] * fairness_reward +
             self.reward_weights['energy_efficiency'] * energy_efficiency_reward
         )
         
-        # 添加惩罚项
+        # 添加惩罚项（使用相对丢包率）
         if dropped_packets > 0:
-            reward -= 0.1 * dropped_packets / max_possible_throughput
+            total_packets = total_throughput + dropped_packets
+            drop_rate = dropped_packets / total_packets if total_packets > 0 else 0
+            reward -= 0.2 * drop_rate  # 丢包率惩罚
+        
+        # 额外的队列积压惩罚
+        if total_queue_length > max_total_queue * 0.7:  # 如果队列使用超过70%
+            reward -= 0.01 * (total_queue_length / max_total_queue - 0.7)
         
         return reward
     

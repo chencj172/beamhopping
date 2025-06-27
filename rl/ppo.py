@@ -114,29 +114,73 @@ class PPO:
         # 获取离散动作分布（波束分配）
         discrete_action_probs = self.discrete_actor(state_tensor)  # shape: [batch_size, action_dim, action_space_size]
         
+        # 检查离散动作概率是否包含NaN
+        if torch.any(torch.isnan(discrete_action_probs)):
+            print(f"Warning: NaN detected in discrete_action_probs in select_action")
+            print(f"State tensor: {state_tensor}")
+            # 用均匀分布替换NaN
+            discrete_action_probs = torch.where(
+                torch.isnan(discrete_action_probs),
+                torch.ones_like(discrete_action_probs) / discrete_action_probs.size(-1),
+                discrete_action_probs
+            )
+        
         # 创建多个分类分布（每个波束一个）
         discrete_action = []
         discrete_action_log_prob_list = []
         
         # 对每个波束采样动作
         for i in range(self.discrete_action_dim):
-            dist = Categorical(probs=discrete_action_probs[0, i])
-            action = dist.sample()
-            discrete_action.append(action.item())
-            discrete_action_log_prob_list.append(dist.log_prob(action))
+            # 检查单个概率分布是否有效
+            probs = discrete_action_probs[0, i]
+            if torch.any(torch.isnan(probs)) or torch.sum(probs) < 1e-8:
+                print(f"Warning: Invalid probs at beam {i}: {probs}")
+                probs = torch.ones_like(probs) / probs.size(0)
+            
+            try:
+                dist = Categorical(probs=probs)
+                action = dist.sample()
+                discrete_action.append(action.item())
+                discrete_action_log_prob_list.append(dist.log_prob(action))
+            except Exception as e:
+                print(f"Error in select_action Categorical: {e}")
+                # 使用随机动作
+                action = torch.randint(0, probs.size(0), (1,)).item()
+                discrete_action.append(action)
+                discrete_action_log_prob_list.append(torch.tensor(0.0, device=probs.device))
         
         # 将离散动作对数概率求和
         discrete_action_log_prob = torch.stack(discrete_action_log_prob_list).sum().item()
         
         # 获取连续动作分布（功率分配）
         continuous_action_mean, continuous_action_std = self.continuous_actor(state_tensor)
-        continuous_dist = Normal(continuous_action_mean, continuous_action_std)
         
-        # 采样连续动作
-        # continuous_action = continuous_dist.sample()
-        continuous_action = torch.sigmoid(continuous_dist.sample())
-        # print("1、", continuous_action)
-        continuous_action_log_prob_tensor = continuous_dist.log_prob(continuous_action)
+        # 检查连续动作参数是否包含NaN
+        if torch.any(torch.isnan(continuous_action_mean)) or torch.any(torch.isnan(continuous_action_std)):
+            print(f"Warning: NaN in select_action continuous parameters")
+            continuous_action_mean = torch.where(
+                torch.isnan(continuous_action_mean),
+                torch.tensor(0.5, device=continuous_action_mean.device),
+                continuous_action_mean
+            )
+            continuous_action_std = torch.where(
+                torch.isnan(continuous_action_std),
+                torch.tensor(0.1, device=continuous_action_std.device),
+                continuous_action_std
+            )
+        
+        try:
+            continuous_dist = Normal(continuous_action_mean, continuous_action_std)
+            # 采样连续动作
+            continuous_action = continuous_dist.sample()
+            # 由于动作网络输出已经在[0,1]范围，但采样可能超出，需要裁剪
+            continuous_action = torch.clamp(continuous_action, 0.0, 1.0)
+            continuous_action_log_prob_tensor = continuous_dist.log_prob(continuous_action)
+        except Exception as e:
+            print(f"Error in select_action continuous sampling: {e}")
+            # 使用均值作为动作，并确保在[0,1]范围内
+            continuous_action = torch.clamp(continuous_action_mean, 0.0, 1.0)
+            continuous_action_log_prob_tensor = torch.zeros_like(continuous_action_mean)
         
         # 计算连续动作对数概率（求和）
         continuous_action_log_prob = continuous_action_log_prob_tensor.sum().item()
@@ -176,6 +220,17 @@ class PPO:
         # 获取离散动作分布（波束分配）
         discrete_action_probs = self.discrete_actor(states)  # shape: [batch_size, action_dim, action_space_size]
         
+        # 检查离散动作概率是否包含NaN
+        if torch.any(torch.isnan(discrete_action_probs)):
+            print(f"Warning: NaN detected in discrete_action_probs in evaluate_actions")
+            print(f"States shape: {states.shape}, States mean: {states.mean()}, States std: {states.std()}")
+            # 用均匀分布替换NaN
+            discrete_action_probs = torch.where(
+                torch.isnan(discrete_action_probs),
+                torch.ones_like(discrete_action_probs) / discrete_action_probs.size(-1),
+                discrete_action_probs
+            )
+        
         # 创建多个分类分布（每个波束一个）
         batch_size = states.size(0)
         discrete_action_log_probs_list = []
@@ -185,10 +240,24 @@ class PPO:
         for b in range(batch_size):
             batch_log_probs = []
             for i in range(self.discrete_action_dim):
-                dist = Categorical(probs=discrete_action_probs[b, i])
-                action = discrete_actions[b, i]
-                batch_log_probs.append(dist.log_prob(action))
-                entropy_discrete += dist.entropy()
+                # 检查单个概率分布是否有效
+                probs = discrete_action_probs[b, i]
+                if torch.any(torch.isnan(probs)) or torch.sum(probs) < 1e-8:
+                    print(f"Warning: Invalid probs at batch {b}, beam {i}: {probs}")
+                    probs = torch.ones_like(probs) / probs.size(0)
+                
+                try:
+                    dist = Categorical(probs=probs)
+                    action = discrete_actions[b, i]
+                    batch_log_probs.append(dist.log_prob(action))
+                    entropy_discrete += dist.entropy()
+                except Exception as e:
+                    print(f"Error creating Categorical distribution: {e}")
+                    print(f"Probs: {probs}")
+                    # 使用默认值
+                    batch_log_probs.append(torch.tensor(0.0, device=probs.device))
+                    entropy_discrete += torch.tensor(0.0, device=probs.device)
+            
             # 对每个批次，将所有波束的对数概率求和
             discrete_action_log_probs_list.append(torch.sum(torch.stack(batch_log_probs)))
         
@@ -198,7 +267,36 @@ class PPO:
         
         # 获取连续动作分布（功率分配）
         continuous_action_mean, continuous_action_std = self.continuous_actor(states)
-        continuous_dist = Normal(continuous_action_mean, continuous_action_std)
+        
+        # 检查连续动作参数是否包含NaN
+        if torch.any(torch.isnan(continuous_action_mean)) or torch.any(torch.isnan(continuous_action_std)):
+            print(f"Warning: NaN detected in continuous action parameters")
+            print(f"Mean NaN count: {torch.isnan(continuous_action_mean).sum()}")
+            print(f"Std NaN count: {torch.isnan(continuous_action_std).sum()}")
+            print(f"States shape: {states.shape}, States mean: {states.mean()}, States std: {states.std()}")
+            
+            # 用安全值替换NaN
+            continuous_action_mean = torch.where(
+                torch.isnan(continuous_action_mean),
+                torch.tensor(0.5, device=continuous_action_mean.device),
+                continuous_action_mean
+            )
+            continuous_action_std = torch.where(
+                torch.isnan(continuous_action_std),
+                torch.tensor(0.1, device=continuous_action_std.device),
+                continuous_action_std
+            )
+        
+        try:
+            continuous_dist = Normal(continuous_action_mean, continuous_action_std)
+        except Exception as e:
+            print(f"Error creating Normal distribution: {e}")
+            print(f"Mean: {continuous_action_mean}")
+            print(f"Std: {continuous_action_std}")
+            # 使用默认分布
+            continuous_action_mean = torch.full_like(continuous_action_mean, 0.5)
+            continuous_action_std = torch.full_like(continuous_action_std, 0.1)
+            continuous_dist = Normal(continuous_action_mean, continuous_action_std)
         
         # 计算连续动作对数概率
         continuous_action_log_probs_raw = continuous_dist.log_prob(continuous_actions)

@@ -15,8 +15,8 @@ class ChannelModel:
                  num_cells: int = 19, 
                  satellite_height_km: float = 1000.0,
                  frequency_ghz: float = 20.0,  # Ka频段典型频率
-                 tx_antenna_gain_db: float = 30.0,  # 发射天线增益
-                 rx_antenna_gain_db: float = 20.0,  # 接收天线增益
+                 tx_antenna_gain_db: float = 40.0,  # 发射天线增益
+                 rx_antenna_gain_db: float = 50.0,  # 接收天线增益
                  channel_variation_std: float = 0.1):  # 信道变化标准差
         """
         初始化信道模型
@@ -226,7 +226,7 @@ class ChannelModel:
                 # 计算卫星到小区的距离
                 cell_position = self.cell_positions[cell_idx]
                 distance = np.linalg.norm(self.satellite_position - cell_position)
-                
+                # print(distance)
                 # 计算路径损耗 (dB)
                 path_loss_db = self._calculate_path_loss(distance)
                 
@@ -238,6 +238,7 @@ class ChannelModel:
                 
                 # 转换为线性值
                 self.channel_gains[beam_idx, cell_idx] = 10 ** (channel_gain_db / 10)
+                # print("beam_idx: ",beam_idx, ", cell_idx: ", cell_idx, "==>", self.channel_gains[beam_idx, cell_idx])
     def _calculate_path_loss(self, distance):
         """
         计算路径损耗
